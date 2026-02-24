@@ -48,10 +48,7 @@ if uploaded_file is not None:
         patch_emb, global_emb = blip_loader.get_image_embeddings(image)
         
         # 2. Localize Faults
-        # The number of patches from BLIP ViT-Base defaults to 16x16 = 256 for a 224x224 input
-        # However, transformers might dynamically adjust based on inputs. 
-        # localize_faults expects flattened patch embeddings.
-        heatmap_np, boxes, num_defective_patches = localize_faults(
+        heatmap_np, boxes, num_defective_patches, primary_box = localize_faults(
             patch_emb, 
             global_emb, 
             image.size, 
@@ -72,49 +69,70 @@ if uploaded_file is not None:
         
     st.markdown("---")
     
-    # 4. Criticality Score
-    st.header("Fault Analysis")
+    # 4. Regional Analysis & Hallucination Mitigation
+    st.header("Localized Fault Analysis")
     
-    # Estimate grid size from number of patches (usually 16 or 14 depending on ViT patch size and crop)
-    grid_size = int(np.sqrt(patch_emb.shape[1]))
-    
-    c_score, severity = calculate_criticality(
-        num_defective_patches=num_defective_patches,
-        w_real=w_real,
-        w_img=image.width,
-        a_threshold=a_threshold,
-        grid_size=grid_size
-    )
-    
-    # Determine severity color
-    if severity == "Minor":
-        sev_color = "green"
-    elif severity == "Moderate":
-        sev_color = "orange"
+    if primary_box:
+        x, y, w, h = primary_box
+        # Crop the region (PIL uses left, top, right, bottom)
+        cropped_region = image.crop((x, y, x + w, y + h))
+        
+        # Spatial Heuristics
+        img_w, img_h = image.size
+        center_x, center_y = x + w/2, y + h/2
+        
+        rel_h = "center"
+        if center_x < img_w * 0.4: rel_h = "left"
+        elif center_x > img_w * 0.6: rel_h = "right"
+        
+        rel_v = "center"
+        if center_y < img_h * 0.4: rel_v = "top"
+        elif center_y > img_h * 0.6: rel_v = "bottom"
+        
+        location_str = f"{rel_v}-{rel_h}" if rel_v != "center" or rel_h != "center" else "center"
+        
+        # Constrained reasoning on crop
+        with st.spinner("Identifying car part in damaged region..."):
+            part_answer = blip_loader.answer_question(cropped_region, "What car part is this?", is_region=True)
+            
+            # Rule-based validation layer
+            # Example: If bbox is bottom half, it shouldn't be hood
+            if center_y > img_h * 0.6 and "hood" in part_answer.lower():
+                part_answer = "lower body/bumper (Corrected from hallucinated 'hood')"
+            
+            st.write(f"**Detected Part:** {part_answer}")
+            st.write(f"**Spatial Location:** {location_str} region (Box: {x}, {y}, {x+w}, {y+h})")
+            
+        with st.spinner("Generating localized caption..."):
+            caption = blip_loader.generate_caption(cropped_region, is_region=True)
+            st.info(f"**Regional Caption:** {caption}")
+            
+        # Confidence Filter
+        grid_size = int(np.sqrt(patch_emb.shape[1]))
+        c_score, severity = calculate_criticality(
+            num_defective_patches=num_defective_patches,
+            w_real=w_real,
+            w_img=image.width,
+            a_threshold=a_threshold,
+            grid_size=grid_size
+        )
+        
+        # Final Verification Rule
+        if c_score < 5: # Low confidence threshold
+             st.warning("⚠️ No visible structural damage detected with high confidence.")
+        else:
+            # Determine severity color
+            sev_color = "green" if severity == "Minor" else ("orange" if severity == "Moderate" else "red")
+            col_c1, col_c2 = st.columns(2)
+            with col_c1: st.metric(label="Criticality Score (C)", value=f"{c_score:.2f}")
+            with col_c2: st.markdown(f"### Severity Level: <span style='color:{sev_color}'>{severity}</span>", unsafe_allow_html=True)
+
     else:
-        sev_color = "red"
-        
-    col_c1, col_c2 = st.columns(2)
-    
-    with col_c1:
-        st.metric(label="Criticality Score (C)", value=f"{c_score:.2f}")
-    with col_c2:
-        st.markdown(f"### Severity Level: <span style='color:{sev_color}'>{severity}</span>", unsafe_allow_html=True)
-        
-    if num_defective_patches == 0:
-        st.success("No Fault Detected")
-        
-    # 5. Captioning
-    st.subheader("Image Caption")
-    with st.spinner("Generating descriptive caption..."):
-        # Guide caption towards anomalies if possible
-        text_prompt = "A photo of " 
-        caption = blip_loader.generate_caption(image, text_prompt)
-        st.info(caption)
-        
-    # 6. VQA
-    st.subheader("Visual Question Answering (VQA)")
-    question = st.text_input("Ask a question about the image:")
+        st.success("No significant anomalies detected.")
+
+    # 6. Global VQA (Optional)
+    st.subheader("Global Visual Question Answering")
+    question = st.text_input("Ask a general question about the image:")
     if question:
         with st.spinner("Answering..."):
             answer = blip_loader.answer_question(image, question)

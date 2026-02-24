@@ -59,20 +59,34 @@ class BLIPLoader:
             
         return patch_embeddings, global_embedding
 
-    def generate_caption(self, image: Image.Image, text_prompt: str = ""):
+    def generate_caption(self, image: Image.Image, text_prompt: str = "", is_region: bool = False):
         """
-        Generates a caption for the image. Assumes prompt could guide captioning.
+        Generates a caption for the image or region.
         """
+        if is_region:
+            # Guide the model to focus on the anomaly
+            text_prompt = "A photo of the damaged area showing " + text_prompt
+            
         inputs = self.processor(images=image, text=text_prompt, return_tensors="pt").to(self.device)
         with torch.no_grad():
             outputs = self.caption_model.generate(**inputs, max_new_tokens=50)
         return self.processor.decode(outputs[0], skip_special_tokens=True)
 
-    def answer_question(self, image: Image.Image, question: str):
+    def answer_question(self, image: Image.Image, question: str, is_region: bool = False):
         """
-        Answers a question about the image using the VQA model.
+        Answers a question using structured prompts for regions to mitigate hallucination.
         """
-        inputs = self.vqa_processor(images=image, text=question, return_tensors="pt").to(self.device)
+        if is_region:
+            # Structured internal prompt for constrained reasoning
+            structured_prompt = (
+                "Question: You are analyzing a car image. The damage is visible in this cropped region. "
+                "Identify the exact car part that is damaged. Choose from: front bumper, rear bumper, trunk, hood, door, side panel. "
+                f"Answer: {question}"
+            )
+            inputs = self.vqa_processor(images=image, text=structured_prompt, return_tensors="pt").to(self.device)
+        else:
+            inputs = self.vqa_processor(images=image, text=question, return_tensors="pt").to(self.device)
+            
         with torch.no_grad():
             outputs = self.vqa_model.generate(**inputs, max_new_tokens=50)
         return self.vqa_processor.decode(outputs[0], skip_special_tokens=True)

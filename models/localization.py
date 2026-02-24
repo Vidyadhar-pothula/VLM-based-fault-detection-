@@ -63,14 +63,18 @@ def localize_faults(patch_embeddings: torch.Tensor, global_embedding: torch.Tens
     
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
-        # Filter very small boxes
-        if w * h > 50: 
+        # Filter very small boxes to reduce noise
+        if w * h > 100: 
             bounding_boxes.append((x, y, w, h))
             total_defective_area_px += (w * h)
             
     # Calculate equivalent defective patches for criticality scoring
-    # 1 patch corresponds to an area of (img_w/grid_size) * (img_h/grid_size) in the original image
     patch_area_px = (img_w / grid_size) * (img_h / grid_size)
     num_defective_patches = total_defective_area_px / patch_area_px if patch_area_px > 0 else 0
     
-    return anomaly_map_resized, bounding_boxes, num_defective_patches
+    primary_box = None
+    if bounding_boxes:
+        # Pick the largest box as the primary target for cropping/analysis
+        primary_box = max(bounding_boxes, key=lambda b: b[2] * b[3])
+    
+    return anomaly_map_resized, bounding_boxes, num_defective_patches, primary_box
