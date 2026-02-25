@@ -78,3 +78,6 @@ def localize_faults(patch_embeddings: torch.Tensor, global_embedding: torch.Tens
         primary_box = max(bounding_boxes, key=lambda b: b[2] * b[3])
     
     return anomaly_map_resized, bounding_boxes, num_defective_patches, primary_box
+
+# Alias for compatibility with requested app structure
+detect_defect = localize_faults

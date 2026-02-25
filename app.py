@@ -13,6 +13,29 @@ from models.localization import localize_faults
 from models.criticality import calculate_criticality
 from utils.visualization import overlay_heatmap, draw_bounding_boxes
 
+def validate_part_answer(answer, bbox, image_height, image_width):
+    """
+    Prevents BLIP hallucinations by validating the answer spatially.
+    """
+    x, y, w, h = bbox
+    y_center = y + h / 2
+    x_center = x + w / 2
+
+    # Relative Position Calculation
+    rel_h = "center"
+    if x_center < image_width * 0.4: rel_h = "left"
+    elif x_center > image_width * 0.6: rel_h = "right"
+    
+    rel_v = "center"
+    if y_center < image_height * 0.4: rel_v = "top"
+    elif y_center > image_height * 0.6: rel_v = "bottom"
+    
+    location_str = f"{rel_v}-{rel_h}" if rel_v != "center" or rel_h != "center" else "center"
+
+    # Validation Layer
+    if y_center > image_height * 0.6 and "hood" in answer.lower():
+        return "rear trunk or bumper", location_str
+
 st.set_page_config(page_title="VLFD - Vision Language Fault Detector", layout="wide")
 
 # Initialize models
@@ -47,7 +70,7 @@ if uploaded_file is not None:
         # 1. Extract Embeddings
         patch_emb, global_emb = blip_loader.get_image_embeddings(image)
         
-        # 2. Localize Faults
+        # 2. Localize Faults (Step 1 of Architecture)
         heatmap_np, boxes, num_defective_patches, primary_box = localize_faults(
             patch_emb, 
             global_emb, 
@@ -73,41 +96,30 @@ if uploaded_file is not None:
     st.header("Localized Fault Analysis")
     
     if primary_box:
+        # Step 2: Crop Region
         x, y, w, h = primary_box
-        # Crop the region (PIL uses left, top, right, bottom)
         cropped_region = image.crop((x, y, x + w, y + h))
         
-        # Spatial Heuristics
-        img_w, img_h = image.size
-        center_x, center_y = x + w/2, y + h/2
-        
-        rel_h = "center"
-        if center_x < img_w * 0.4: rel_h = "left"
-        elif center_x > img_w * 0.6: rel_h = "right"
-        
-        rel_v = "center"
-        if center_y < img_h * 0.4: rel_v = "top"
-        elif center_y > img_h * 0.6: rel_v = "bottom"
-        
-        location_str = f"{rel_v}-{rel_h}" if rel_v != "center" or rel_h != "center" else "center"
-        
-        # Constrained reasoning on crop
-        with st.spinner("Identifying car part in damaged region..."):
-            part_answer = blip_loader.answer_question(cropped_region, "What car part is this?", is_region=True)
+        # Step 3: Ask BLIP about cropped region only
+        with st.spinner("Identifying car part in damaged region (Cropped VQA)..."):
+            part_answer_raw = blip_loader.answer_question(
+                cropped_region, 
+                "Identify the exact car part visible in this cropped damaged region.", 
+                is_region=True
+            )
             
-            # Rule-based validation layer
-            # Example: If bbox is bottom half, it shouldn't be hood
-            if center_y > img_h * 0.6 and "hood" in part_answer.lower():
-                part_answer = "lower body/bumper (Corrected from hallucinated 'hood')"
+            # Step 4: Spatial Validation Layer
+            img_w, img_h = image.size
+            part_answer, location_str = validate_part_answer(part_answer_raw, primary_box, img_h, img_w)
             
             st.write(f"**Detected Part:** {part_answer}")
             st.write(f"**Spatial Location:** {location_str} region (Box: {x}, {y}, {x+w}, {y+h})")
             
-        with st.spinner("Generating localized caption..."):
+        with st.spinner("Generating localized caption on cropped region..."):
             caption = blip_loader.generate_caption(cropped_region, is_region=True)
             st.info(f"**Regional Caption:** {caption}")
             
-        # Confidence Filter
+        # 5. Criticality Scoring
         grid_size = int(np.sqrt(patch_emb.shape[1]))
         c_score, severity = calculate_criticality(
             num_defective_patches=num_defective_patches,
@@ -117,15 +129,13 @@ if uploaded_file is not None:
             grid_size=grid_size
         )
         
-        # Final Verification Rule
-        if c_score < 5: # Low confidence threshold
+        # Confidence Filter
+        if c_score < 5: 
              st.warning("⚠️ No visible structural damage detected with high confidence.")
         else:
-            # Determine severity color
             sev_color = "green" if severity == "Minor" else ("orange" if severity == "Moderate" else "red")
-            col_c1, col_c2 = st.columns(2)
-            with col_c1: st.metric(label="Criticality Score (C)", value=f"{c_score:.2f}")
-            with col_c2: st.markdown(f"### Severity Level: <span style='color:{sev_color}'>{severity}</span>", unsafe_allow_html=True)
+            st.metric(label="Criticality Score (C)", value=f"{c_score:.2f}")
+            st.markdown(f"### Severity Level: <span style='color:{sev_color}'>{severity}</span>", unsafe_allow_html=True)
 
     else:
         st.success("No significant anomalies detected.")

@@ -72,21 +72,24 @@ class BLIPLoader:
             outputs = self.caption_model.generate(**inputs, max_new_tokens=50)
         return self.processor.decode(outputs[0], skip_special_tokens=True)
 
-    def answer_question(self, image: Image.Image, question: str, is_region: bool = False):
+    def answer_question(self, image, question, is_region=False):
         """
-        Answers a question using structured prompts for regions to mitigate hallucination.
+        Answer a question about an image using BLIP VQA.
+
+        Args:
+            image (PIL.Image): input image
+            question (str): question string
+            is_region (bool): whether the image is a cropped defect region
         """
+
         if is_region:
-            # Structured internal prompt for constrained reasoning
-            structured_prompt = (
-                "Question: You are analyzing a car image. The damage is visible in this cropped region. "
-                "Identify the exact car part that is damaged. Choose from: front bumper, rear bumper, trunk, hood, door, side panel. "
-                f"Answer: {question}"
-            )
-            inputs = self.vqa_processor(images=image, text=structured_prompt, return_tensors="pt").to(self.device)
-        else:
-            inputs = self.vqa_processor(images=image, text=question, return_tensors="pt").to(self.device)
-            
+            question = f"This image shows a cropped damaged region of a car. {question}"
+
+        # Use the VQA specific processor and model
+        inputs = self.vqa_processor(image, question, return_tensors="pt").to(self.device)
+
         with torch.no_grad():
-            outputs = self.vqa_model.generate(**inputs, max_new_tokens=50)
-        return self.vqa_processor.decode(outputs[0], skip_special_tokens=True)
+            output = self.vqa_model.generate(**inputs)
+        answer = self.vqa_processor.decode(output[0], skip_special_tokens=True)
+
+        return answer
